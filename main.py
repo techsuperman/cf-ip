@@ -708,17 +708,17 @@ class IpInfoAsync:
             return None
         return self.token_list[self.current_token_index]
 
-    async def switch_token(self):
+    async def switch_token(self, silent=False):
         async with self.token_lock:
             if self.exhausted:
                 return False
             if self.current_token_index + 1 < len(self.token_list):
                 self.current_token_index += 1
-                print(f"\n切换至第 {self.current_token_index + 1} 个 token")
                 return True
             else:
                 self.exhausted = True
-                print("\n所有 token 均已触发 429 速率限制，无可用 token！后续 IP 将直接标记为 Unknown。")
+                if not silent:
+                    print("\n所有 token 均已触发 429 速率限制，无可用 token！后续 IP 将直接标记为 Unknown。")
                 return False
 
     async def _rate_limit(self):
@@ -730,12 +730,18 @@ class IpInfoAsync:
             self.last_request_time = asyncio.get_event_loop().time()
 
     async def get_ip_details(self, ip_address):
+        """查询单个 IP 详情，增加本机校验支持，超时直接返回 None"""
         while True:
             token = self.current_token
             if token is None:
                 return None
 
-            url = f"https://ipinfo.io/{ip_address}/json?token={token}"
+            # 如果是空字符串，查本机，否则查指定 IP
+            if ip_address:
+                url = f"https://ipinfo.io/{ip_address}/json?token={token}"
+            else:
+                url = f"https://ipinfo.io/json?token={token}"
+
             await self._rate_limit()
             async with self.semaphore:
                 try:
@@ -825,7 +831,11 @@ def sort_cache_file(cache_file):
 async def validate_tokens(token_list, concurrency, min_interval, trust_env):
     valid = []
     async with IpInfoAsync(token_list, concurrency, min_interval, trust_env) as handler:
-        tasks = [asyncio.ensure_future(handler.get_ip_details("1.1.1.1")) for _ in token_list]
+        # 让校验期间的所有 token 切换静默（不打印任何切换信息，也不打印“耗尽”误报）
+        handler.switch_token = lambda: IpInfoAsync.switch_token(handler, silent=True)
+
+        # 传入空字符串作为 IP 地址，让 get_ip_details 自动查本机
+        tasks = [asyncio.ensure_future(handler.get_ip_details("")) for _ in token_list]
         total = len(tasks)
         completed = 0
         for coro in asyncio.as_completed(tasks):
